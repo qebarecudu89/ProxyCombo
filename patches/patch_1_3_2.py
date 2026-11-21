@@ -1,0 +1,116 @@
+import os
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def replace_in_file(rel_path, old, new):
+    path = os.path.join(ROOT, rel_path)
+    if not os.path.exists(path): 
+        print(f"❌ Файл не найден: {rel_path}")
+        return False
+    with open(path, "r", encoding="utf-8") as f: 
+        content = f.read()
+    if old not in content: 
+        print(f"⚠️  Блок не найден в {rel_path}. Возможно, уже исправлено.")
+        return False
+    content = content.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8", newline="\n") as f: 
+        f.write(content)
+    return True
+
+def main():
+    print("🔧 Исправляю update_btn через ft.Ref (v1.3.2)...")
+
+    # 1. Бамп версии
+    replace_in_file("version.py", 'VERSION = "1.3.1"', 'VERSION = "1.3.2"')
+    replace_in_file("proxycombo/config.py", 'CURRENT_VERSION = "1.3.1"', 'CURRENT_VERSION = "1.3.2"')
+
+    # 2. Находим текущий блок и меняем его на безопасный
+    old_block = '''    update_info = {"version": None, "url": None}
+    update_btn = ft.Container(
+        content=ft.Text("Обновить", size=11, color="white", weight=ft.FontWeight.W_700),
+        padding=ft.Padding.symmetric(vertical=8, horizontal=16),
+        bgcolor=C.SUCCESS, border_radius=8,
+        on_click=lambda e: asyncio.create_task(do_update(e)),
+        visible=False,
+    )
+
+    async def check_updates_on_start():
+        latest, url = await asyncio.get_event_loop().run_in_executor(None, check_for_updates)
+        if latest:
+            update_info["version"] = latest
+            update_info["url"] = url
+            log(f"🚀 Доступно обновление: v{latest} (текущая: v{C.CURRENT_VERSION})", "warn")
+            update_btn.content.value = f"Обновить до v{latest}"
+            update_btn.visible = True
+            page.update()
+
+    async def do_update(e):
+        if not update_info["url"]:
+            return
+        log("⏳ Скачивание и установка обновления...", "step")
+        ok = await asyncio.get_event_loop().run_in_executor(
+            None, download_and_update, update_info["url"]
+        )
+        if not ok:
+            log("❌ Ошибка обновления (возможно, вы запустили не EXE)", "error")
+
+    page.run_task(check_updates_on_start)'''
+
+    new_block = '''    update_info = {"version": None, "url": None}
+    update_btn_ref = ft.Ref[ft.Container]()
+
+    async def check_updates_on_start():
+        latest, url = await asyncio.get_event_loop().run_in_executor(None, check_for_updates)
+        if latest:
+            update_info["version"] = latest
+            update_info["url"] = url
+            log(f"🚀 Доступно обновление: v{latest} (текущая: v{C.CURRENT_VERSION})", "warn")
+            if update_btn_ref.current:
+                update_btn_ref.current.content.value = f"Обновить до v{latest}"
+                update_btn_ref.current.visible = True
+            page.update()
+
+    async def do_update(e):
+        if not update_info["url"]:
+            return
+        log("⏳ Скачивание и установка обновления...", "step")
+        ok = await asyncio.get_event_loop().run_in_executor(
+            None, download_and_update, update_info["url"]
+        )
+        if not ok:
+            log("❌ Ошибка обновления (возможно, вы запустили не EXE)", "error")
+
+    page.run_task(check_updates_on_start)'''
+
+    replace_in_file("proxycombo/app.py", old_block, new_block)
+
+    # 3. Заменяем update_btn в layout на версию с ref
+    layout_old = '''            ft.Container(
+                content=ft.Row([build_status_bar(status_dot, status_text, ip_text), update_btn]),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=4),
+                bgcolor=C.BG_TITLEBAR,
+            ),'''
+    
+    layout_new = '''            ft.Container(
+                content=ft.Row([
+                    build_status_bar(status_dot, status_text, ip_text),
+                    ft.Container(
+                        content=ft.Text("Обновить", size=11, color="white", weight=ft.FontWeight.W_700),
+                        padding=ft.Padding.symmetric(vertical=8, horizontal=16),
+                        bgcolor=C.SUCCESS, border_radius=8,
+                        on_click=lambda e: asyncio.create_task(do_update(e)),
+                        visible=False,
+                        ref=update_btn_ref,
+                    )
+                ]),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=4),
+                bgcolor=C.BG_TITLEBAR,
+            ),'''
+
+    replace_in_file("proxycombo/app.py", layout_old, layout_new)
+
+    print("✅ Патч v1.3.2 успешно применён!")
+    print("💡 Запусти: python main.py --debug")
+
+if __name__ == "__main__":
+    main()

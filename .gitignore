@@ -1,0 +1,13 @@
+build/
+dist/
+__pycache__/
+*.spec
+*.pkg
+sing-box.exe
+gost.exe
+singbox-config.json
+chrome_cleaner.log
+first_run.flag
+system_proxy_backup.json
+chrome_cleaner_state.json
+urls.txt

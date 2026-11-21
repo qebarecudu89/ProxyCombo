@@ -1,0 +1,416 @@
+--- a/version.py
++++ b/version.py
+@@ -1,4 +1,4 @@
+-VERSION = "1.0.0"
++VERSION = "1.1.0"
+--- a/proxycombo/config.py
++++ b/proxycombo/config.py
+@@ -35,6 +35,22 @@ ROTATION_COOLDOWN = 120
+     "chrome_cleaner_profile",
+ )
+ 
++# ---- Браузеры ----
++BROWSERS = {
++    "chrome": {
++        "title": "Google Chrome",
++        "exe": "chrome.exe",
++        "processes": ["chrome.exe"],
++        "paths": [
++            r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
++            r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
++            r"%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe",
++        ],
++        "user_data": r"%LOCALAPPDATA%\\Google\\Chrome\\User Data",
++        "registry": r"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
++    },
++    "yandex": {
++        "title": "Yandex Browser",
++        "exe": "browser.exe",
++        "processes": ["browser.exe", "yandex_browser.exe"],
++        "paths": [
++            r"C:\\Program Files\\Yandex\\YandexBrowser\\Application\\browser.exe",
++            r"C:\\Program Files (x86)\\Yandex\\YandexBrowser\\Application\\browser.exe",
++            r"%LOCALAPPDATA%\\Yandex\\YandexBrowser\\Application\\browser.exe",
++        ],
++        "user_data": r"%LOCALAPPDATA%\\Yandex\\YandexBrowser\\User Data",
++        "registry": r"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\browser.exe",
++    },
++}
++
++DEFAULT_BROWSER = "chrome"
++TEMP_PROFILE_YANDEX = os.path.join(
++    os.environ.get("TEMP", tempfile.gettempdir()),
++    "yandex_cleaner_profile",
++)
++
+ BG_DEEP = "#1a1a22"
+ BG = "#22222e"
+ BG_CARD = "#2a2a38"
+--- a/proxycombo/state.py
++++ b/proxycombo/state.py
+@@ -10,6 +10,7 @@ def load_state() -> dict:
+     return {
+         "mode": "singbox",
++        "browser": "chrome",
+         "rotation_url": "",
+         "proxy_host": "",
+         "proxy_port": "",
+--- a/proxycombo/relays.py
++++ b/proxycombo/relays.py
+@@ -1,4 +1,5 @@
+ import json
+ import os
+ import socket
+@@ -30,6 +31,21 @@
+ 
+ 
++def get_browser_processes(browser: str = "chrome"):
++    """
++    Возвращает список процессов указанного браузера.
++    browser — ключ из config.BROWSERS.
++    """
++    try:
++        from .config import BROWSERS
++        names = set(BROWSERS.get(browser, {}).get("processes", []))
++    except Exception:
++        names = {"chrome.exe"}
++    procs = []
++    for proc in psutil.process_iter(["name"]):
++        try:
++            name = (proc.info["name"] or "").lower()
++            if name in names:
++                procs.append(proc)
++        except (psutil.NoSuchProcess, psutil.AccessDenied):
++            continue
++    return procs
++
++
+ # Совместимость: старое имя работает как chrome
+ def get_chrome_processes():
+-    procs = []
+-    for proc in psutil.process_iter(["name"]):
+-        try:
+-            if proc.info["name"] and proc.info["name"].lower() == "chrome.exe":
+-                procs.append(proc)
+-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+-            continue
+-    return procs
++    return get_browser_processes("chrome")
+--- a/proxycombo/chrome.py
++++ b/proxycombo/chrome.py
+@@ -1,64 +1,168 @@
+ import os
+ import shutil
+ import time
+ 
+-from .config import TEMP_PROFILE
+-from .relays import _run_hidden, get_chrome_processes
++from .config import (
++    TEMP_PROFILE, TEMP_PROFILE_YANDEX, BROWSERS, DEFAULT_BROWSER,
++)
++from .relays import _run_hidden, get_browser_processes
++
++
++def _browser_cfg(browser: str) -> dict:
++    return BROWSERS.get(browser) or BROWSERS[DEFAULT_BROWSER]
++
++
++def get_browser_temp_profile(browser: str) -> str:
++    return TEMP_PROFILE_YANDEX if browser == "yandex" else TEMP_PROFILE
+ 
+ 
+-def find_chrome_exe():
++def find_browser_exe(browser: str = None):
++    """
++    Ищет исполняемый файл указанного браузера.
++    Если browser None — возвращает путь первого найденного.
++    """
++    if browser is None:
++        for key in BROWSERS:
++            p = find_browser_exe(key)
++            if p:
++                return p
++        return None
++
++    cfg = _browser_cfg(browser)
++    for p in cfg.get("paths", []):
++        p_expanded = os.path.expandvars(p)
++        if os.path.exists(p_expanded):
++            return p_expanded
++
++    # fallback через реестр App Paths
+     try:
+         import winreg
+-        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
++        reg_path = cfg.get("registry")
++        if not reg_path:
++            return None
++        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+             try:
+-                with winreg.OpenKey(
+-                    hive,
+-                    r"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
+-                ) as k:
++                with winreg.OpenKey(hive, reg_path) as k:
+                     val, _ = winreg.QueryValueEx(k, None)
+                     if val and os.path.exists(val):
+                         return val
+             except FileNotFoundError:
+                 pass
+     except Exception:
+         pass
+     return None
+ 
+ 
+-def get_user_data_path():
+-    return os.path.join(os.environ.get("LOCALAPPDATA", ""),
+-                        r"Google\\Chrome\\User Data")
++def find_chrome_exe():
++    return find_browser_exe("chrome")
+ 
+ 
+-def kill_all_chrome(log=None):
+-    procs = get_chrome_processes()
++def get_user_data_path(browser: str = None) -> str:
++    if browser is None:
++        browser = DEFAULT_BROWSER
++    cfg = _browser_cfg(browser)
++    return os.path.expandvars(cfg["user_data"])
++
++
++def kill_all_browser(browser: str = None, log=None) -> bool:
++    if browser is None:
++        browser = DEFAULT_BROWSER
++    cfg = _browser_cfg(browser)
++    title = cfg.get("title", browser)
++    procs = get_browser_processes(browser)
+     if not procs:
+         if log:
+-            log("✅ Chrome не запущен", "success")
++            log(f"✅ {title} не запущен", "success")
+         return True
+     if log:
+-        log(f"🔪 Убиваю {len(procs)} процессов Chrome", "step")
++        log(f"🔪 Убиваю {len(procs)} процессов {title}", "step")
+     for p in procs:
+         try:
+             p.kill()
+         except Exception:
+             pass
+     time.sleep(1)
+-    _run_hidden(["taskkill", "/F", "/IM", "chrome.exe", "/T"], shell=True)
++    for exe in cfg.get("processes", []):
++        _run_hidden(["taskkill", "/F", "/IM", exe, "/T"], shell=True)
+     for _ in range(6):
+         time.sleep(1)
+-        if not get_chrome_processes():
++        if not get_browser_processes(browser):
+             break
+-    remaining = get_chrome_processes()
++    remaining = get_browser_processes(browser)
+     if remaining:
+         if log:
+-            log(f"⚠️ Остались процессы: {len(remaining)}", "warn")
++            log(f"⚠️ Остались процессы {title}: {len(remaining)}", "warn")
+         return False
+     if log:
+-        log("✅ Все процессы Chrome убиты", "success")
++        log(f"✅ Все процессы {title} убиты", "success")
+     return True
+ 
+ 
++def kill_all_chrome(log=None):
++    return kill_all_browser("chrome", log)
++
++
+ def full_clean(user_data, log, progress_cb=None):
+     if not os.path.exists(user_data):
+         log(f"❌ Папка не найдена: {user_data}", "error")
+         return False
+@@ -84,17 +188,22 @@
+     log(f"✅ Очищено: удалено {deleted}, ошибок {errors}", "success")
+     return True
+ 
+ 
+-def prepare_temp_profile(log=None):
++def prepare_temp_profile(browser: str = None, log=None) -> bool:
++    if browser is None:
++        browser = DEFAULT_BROWSER
++    profile = get_browser_temp_profile(browser)
+     try:
+-        if os.path.exists(TEMP_PROFILE):
+-            shutil.rmtree(TEMP_PROFILE, ignore_errors=True)
+-        os.makedirs(TEMP_PROFILE, exist_ok=True)
++        if os.path.exists(profile):
++            shutil.rmtree(profile, ignore_errors=True)
++        os.makedirs(profile, exist_ok=True)
+         return True
+     except Exception:
+         return False
+--- a/proxycombo/ui/tabs.py
++++ b/proxycombo/ui/tabs.py
+@@ -1,4 +1,5 @@
+ import flet as ft
+ from .. import config as C
+ from .. import hooks
+ from .widgets import big_stat
+ 
+@@ -22,6 +23,19 @@ def build_tabs(ctx):
+                         ft.Container(height=4),
+                         ft.Text("Оставь пустым — Chrome откроется через обычный интернет",
+                                 size=10, color=C.SUBTEXT),
++                        ft.Container(height=10),
++                        ft.Row(
++                            [
++                                ft.Icon(ft.Icons.WEB, size=14, color=C.ORANGE),
++                                ft.Text("Браузер", size=11, color=C.TEXT,
++                                        weight=ft.FontWeight.W_600),
++                                ft.Container(expand=True),
++                                ctx["browser_dropdown"],
++                            ],
++                            spacing=6,
++                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
++                        ),
++                        ft.Container(height=6),
++                        ctx["browser_kill_btn"],
+                         ft.Container(height=12),
+                         ft.Row([ctx["proxy_host_input"], ctx["proxy_port_input"]],
+                                spacing=8),
+--- a/proxycombo/app.py
++++ b/proxycombo/app.py
+@@ -9,7 +9,9 @@ import flet as ft
+ from . import config as C
+ from . import state as state_mod
+ from . import hooks
+ from .logging_utils import file_log, dbg
+ from . import relays
+ from .rotation import trigger_rotation
+-from .chrome import (find_chrome_exe, get_user_data_path, kill_all_chrome,
+-                     full_clean, prepare_temp_profile)
++from .chrome import (find_browser_exe, get_user_data_path, kill_all_browser,
++                     kill_all_chrome, full_clean, prepare_temp_profile,
++                     get_browser_temp_profile)
+ from .net_monitor import calc_speed, measure_ping, get_current_ip
+ from .system_proxy import (is_system_proxy_enabled, set_system_proxy,
+                            clear_system_proxy,
+@@ -84,6 +86,22 @@ async def main(page: ft.Page):
+     proxy_pass_input.value = state.get("proxy_pass", "")
+     proxy_type_input.value = state.get("proxy_type", "socks5")
+     rotation_url_input.value = state.get("rotation_url", "")
+ 
++    # ------- Браузер -------
++    browser_state = {"value": state.get("browser", C.DEFAULT_BROWSER)}
++    if browser_state["value"] not in C.BROWSERS:
++        browser_state["value"] = C.DEFAULT_BROWSER
++
++    browser_dropdown = ft.Dropdown(
++        label="Браузер",
++        value=browser_state["value"],
++        options=[
++            ft.dropdown.Option(k, v["title"])
++            for k, v in C.BROWSERS.items()
++        ],
++        border_color=C.BORDER, focused_border_color=C.ORANGE, color=C.TEXT,
++        bgcolor=C.BG_INPUT, border_radius=10, text_size=12, width=200,
++    )
++
++    def on_browser_change(e):
++        browser_state["value"] = e.control.value
++        state["browser"] = e.control.value
++        state_mod.save_state(state)
++        page.update()
++
++    browser_dropdown.on_change = on_browser_change
++
++    async def on_kill_browser(e=None):
++        b = browser_state["value"]
++        title = C.BROWSERS[b]["title"]
++        log(f"🔪 Закрываю {title}...", "step")
++        ok = await asyncio.get_event_loop().run_in_executor(
++            None, kill_all_browser, b, log
++        )
++        if ok:
++            log(f"✅ {title} закрыт", "success")
++
++    browser_kill_btn = ft.Container(
++        content=ft.Row(
++            [ft.Icon(ft.Icons.CLOSE, size=14, color=C.DANGER),
++             ft.Text("Закрыть браузер", size=11, color=C.TEXT)],
++            spacing=6, alignment=ft.MainAxisAlignment.CENTER,
++        ),
++        on_click=on_kill_browser,
++        padding=ft.Padding.symmetric(vertical=8, horizontal=12),
++        bgcolor=C.BG_INPUT,
++        border=ft.Border.all(1, C.BORDER_SOFT),
++        border_radius=10,
++    )
++
+     def current_proxy_from_ui():
+         try:
+             port = int(proxy_port_input.value.strip())
+@@ -272,29 +290,35 @@ async def main(page: ft.Page):
+             log("══════════════════════════", "step")
+ 
+-            exe = find_chrome_exe()
++            browser = browser_state["value"]
++            b_cfg = C.BROWSERS[browser]
++            b_title = b_cfg["title"]
++            exe = find_browser_exe(browser)
+             if not exe:
+-                log("❌ Chrome не найден", "error")
+-                set_status("Ошибка: Chrome не найден", C.DANGER, C.DANGER)
++                log(f"❌ {b_title} не найден", "error")
++                set_status(f"Ошибка: {b_title} не найден", C.DANGER, C.DANGER)
+                 return
+-            log(f"✅ Chrome: {os.path.basename(exe)}", "success")
++            log(f"✅ {b_title}: {os.path.basename(exe)}", "success")
+ 
+-            data = get_user_data_path()
++            data = get_user_data_path(browser)
+             if not os.path.exists(data):
+                 log("❌ Профиль не найден", "error")
+                 set_status("Ошибка", C.DANGER, C.DANGER)
+                 return
++            temp_profile = get_browser_temp_profile(browser)
+ 
+             proxy = current_proxy_from_ui()
+             urls = get_urls()
+@@ -320,8 +348,8 @@ async def main(page: ft.Page):
+                 log("ℹ️ Прокси не задан — обычный интернет", "info")
+                 set_status("Прямой интернет", C.CYAN, C.CYAN)
+                 await loop.run_in_executor(None, clear_system_proxy)
+                 await loop.run_in_executor(None, relays.stop_relays)
+-                await loop.run_in_executor(None, kill_all_chrome, log)
+-                await loop.run_in_executor(None, prepare_temp_profile, log)
++                await loop.run_in_executor(None, kill_all_browser, browser, log)
++                await loop.run_in_executor(None, prepare_temp_profile, browser, log)
+                 await loop.run_in_executor(None, full_clean, data, log, None)
+                 chrome_args = [
+-                    f"--user-data-dir={C.TEMP_PROFILE}",
++                    f"--user-data-dir={temp_profile}",
+                     "--no-first-run", "--no-default-browser-check",
+                     "--disable-session-crashed-bubble",
+@@ -376,9 +404,9 @@ async def main(page: ft.Page):
+ 
+             log("🧹 ОЧИСТКА CHROME", "step")
+-            await loop.run_in_executor(None, kill_all_chrome, log)
+-            await loop.run_in_executor(None, prepare_temp_profile, log)
++            await loop.run_in_executor(None, kill_all_browser, browser, log)
++            await loop.run_in_executor(None, prepare_temp_profile, browser, log)
+             await loop.run_in_executor(None, full_clean, data, log, None)
+             hooks.run("after_clean", 0, 0, log)
+ 
+             log("🌐 ОТКРЫТИЕ САЙТОВ", "step")
+             proxy_arg = f"--proxy-server={proxy['scheme']}://127.0.0.1:{C.LOCAL_PORT}"
+             chrome_args = [
+-                f"--user-data-dir={C.TEMP_PROFILE}", proxy_arg,
++                f"--user-data-dir={temp_profile}", proxy_arg,
+                 "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1",
+@@ -469,6 +497,8 @@ async def main(page: ft.Page):
+     ctx = {
+         "page": page,
++        "browser_dropdown": browser_dropdown,
++        "browser_kill_btn": browser_kill_btn,
+         "proxy_host_input": proxy_host_input, "proxy_port_input": proxy_port_input,
+         "proxy_user_input": proxy_user_input, "proxy_pass_input": proxy_pass_input,
+         "proxy_type_input": proxy_type_input,
